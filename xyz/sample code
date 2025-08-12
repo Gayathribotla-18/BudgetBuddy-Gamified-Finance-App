@@ -1,0 +1,453 @@
+// Project: Digital Piggy Bank - Member 2 (Goals & Progress)
+// This document contains a modular, ready-to-use Flutter + Firestore implementation for:
+// - Goal model
+// - Firestore service
+// - Goal provider (state management)
+// - Screens: Goals list, Add/Edit Goal
+// - Widget: Animated progress bar
+//
+// Place files in the appropriate folders inside your Flutter project as indicated.
+// Add these dependencies (pubspec.yaml):
+//   firebase_core: ^2.7.0
+//   cloud_firestore: ^4.7.0
+//   provider: ^6.0.5
+//   intl: ^0.18.0
+//
+// Also make sure to initialize Firebase in main.dart with Firebase.initializeApp() and
+// add the google-services.json / GoogleService-Info.plist from your shared Firebase project.
+
+// =======================
+// File: lib/models/goal_model.dart
+// =======================
+
+class GoalModel {
+  final String id;
+  final String title;
+  final int targetAmount; // stored as integer rupees
+  final int savedAmount;
+  final DateTime? deadline;
+  final DateTime createdAt;
+
+  GoalModel({
+    required this.id,
+    required this.title,
+    required this.targetAmount,
+    required this.savedAmount,
+    required this.deadline,
+    required this.createdAt,
+  });
+
+  double get progress => targetAmount == 0 ? 0.0 : (savedAmount / targetAmount).clamp(0.0, 1.0);
+
+  Map<String, dynamic> toMap() => {
+        'title': title,
+        'targetAmount': targetAmount,
+        'savedAmount': savedAmount,
+        'deadline': deadline?.toIso8601String(),
+        'createdAt': createdAt.toIso8601String(),
+      };
+
+  factory GoalModel.fromMap(String id, Map<String, dynamic> m) {
+    return GoalModel(
+      id: id,
+      title: m['title'] ?? '',
+      targetAmount: (m['targetAmount'] ?? 0) as int,
+      savedAmount: (m['savedAmount'] ?? 0) as int,
+      deadline: m['deadline'] != null ? DateTime.parse(m['deadline']) : null,
+      createdAt: m['createdAt'] != null ? DateTime.parse(m['createdAt']) : DateTime.now(),
+    );
+  }
+}
+
+
+// =======================
+// File: lib/services/firestore_service.dart
+// =======================
+
+import 'package:cloud_firestore/cloud_firestore.dart';
+import '../models/goal_model.dart';
+
+class FirestoreService {
+  final FirebaseFirestore _db = FirebaseFirestore.instance;
+
+  // collection path: users/{uid}/goals
+  CollectionReference<Map<String, dynamic>> goalsCollection(String uid) =>
+      _db.collection('users').doc(uid).collection('goals');
+
+  Stream<List<GoalModel>> streamGoals(String uid) {
+    return goalsCollection(uid).orderBy('createdAt', descending: true).snapshots().map((snap) {
+      return snap.docs.map((d) => GoalModel.fromMap(d.id, d.data())).toList();
+    });
+  }
+
+  Future<String> addGoal(String uid, GoalModel goal) async {
+    final doc = await goalsCollection(uid).add(goal.toMap());
+    return doc.id;
+  }
+
+  Future<void> updateGoal(String uid, String goalId, Map<String, dynamic> updates) async {
+    await goalsCollection(uid).doc(goalId).update(updates);
+  }
+
+  Future<void> addDeposit(String uid, String goalId, int amount) async {
+    final docRef = goalsCollection(uid).doc(goalId);
+    await _db.runTransaction((tx) async {
+      final snapshot = await tx.get(docRef);
+      if (!snapshot.exists) throw Exception('Goal not found');
+      final current = (snapshot.data()?['savedAmount'] ?? 0) as int;
+      final newSaved = current + amount;
+      tx.update(docRef, {'savedAmount': newSaved});
+    });
+  }
+
+  Future<void> deleteGoal(String uid, String goalId) async {
+    await goalsCollection(uid).doc(goalId).delete();
+  }
+}
+
+
+// =======================
+// File: lib/providers/goal_provider.dart
+// =======================
+
+import 'package:flutter/material.dart';
+import '../models/goal_model.dart';
+import '../services/firestore_service.dart';
+
+class GoalProvider with ChangeNotifier {
+  final FirestoreService firestore;
+  final String uid; // current user id
+
+  GoalProvider({required this.firestore, required this.uid}) {
+    _init();
+  }
+
+  List<GoalModel> _goals = [];
+  bool _loading = true;
+
+  List<GoalModel> get goals => _goals;
+  bool get loading => _loading;
+
+  late final Stream<List<GoalModel>> _stream;
+  void _init() {
+    _stream = firestore.streamGoals(uid);
+    _stream.listen((list) {
+      _goals = list;
+      _loading = false;
+      notifyListeners();
+    });
+  }
+
+  Future<void> addGoal(GoalModel g) async {
+    _loading = true;
+    notifyListeners();
+    final id = await firestore.addGoal(uid, g);
+    // after Firestore update, stream will refresh automatically
+    _loading = false;
+    notifyListeners();
+    return;
+  }
+
+  Future<void> addDeposit(String goalId, int amount) async {
+    await firestore.addDeposit(uid, goalId, amount);
+  }
+
+  Future<void> deleteGoal(String goalId) async {
+    await firestore.deleteGoal(uid, goalId);
+  }
+
+  Future<void> updateGoal(String goalId, Map<String, dynamic> updates) async {
+    await firestore.updateGoal(uid, goalId, updates);
+  }
+}
+
+
+// =======================
+// File: lib/widgets/progress_circle.dart
+// =======================
+
+import 'package:flutter/material.dart';
+
+class ProgressCircle extends StatelessWidget {
+  final double percent; // 0.0 - 1.0
+  final String label;
+  final int saved;
+  final int target;
+
+  const ProgressCircle({super.key, required this.percent, required this.saved, required this.target, required this.label});
+
+  @override
+  Widget build(BuildContext context) {
+    final displayPct = (percent * 100).toStringAsFixed(0);
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        SizedBox(
+          width: 110,
+          height: 110,
+          child: Stack(
+            alignment: Alignment.center,
+            children: [
+              CircularProgressIndicator(
+                value: percent,
+                strokeWidth: 12,
+                backgroundColor: Colors.grey.shade200,
+              ),
+              Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text('$displayPct%', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 18)),
+                  Text('₹$saved/₹$target', style: TextStyle(fontSize: 12, color: Colors.grey[700])),
+                ],
+              )
+            ],
+          ),
+        ),
+        SizedBox(height: 8),
+        Text(label, style: TextStyle(fontWeight: FontWeight.w600))
+      ],
+    );
+  }
+}
+
+
+// =======================
+// File: lib/screens/goals_screen.dart
+// =======================
+
+import 'package:flutter/material.dart';
+import 'package:provider/provider.dart';
+import 'package:intl/intl.dart';
+import '../providers/goal_provider.dart';
+import '../widgets/progress_circle.dart';
+import 'add_goal_screen.dart';
+
+class GoalsScreen extends StatelessWidget {
+  const GoalsScreen({super.key});
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: Text('Your Goals')),
+      floatingActionButton: FloatingActionButton(
+        onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (_) => AddGoalScreen())),
+        child: Icon(Icons.add),
+      ),
+      body: Consumer<GoalProvider>(builder: (context, provider, _) {
+        if (provider.loading) return Center(child: CircularProgressIndicator());
+        if (provider.goals.isEmpty) return Center(child: Text('No goals yet. Tap + to create one.'));
+        return ListView.builder(
+          padding: EdgeInsets.all(12),
+          itemCount: provider.goals.length,
+          itemBuilder: (context, i) {
+            final g = provider.goals[i];
+            final df = g.deadline != null ? DateFormat.yMMMd().format(g.deadline!) : 'No deadline';
+            return Card(
+              margin: EdgeInsets.symmetric(vertical: 8),
+              child: ListTile(
+                contentPadding: EdgeInsets.all(12),
+                leading: ProgressCircle(percent: g.progress, saved: g.savedAmount, target: g.targetAmount, label: ''),
+                title: Text(g.title, style: TextStyle(fontWeight: FontWeight.bold)),
+                subtitle: Text('Target: ₹${g.targetAmount} • Deadline: $df'),
+                trailing: PopupMenuButton<String>(
+                  onSelected: (val) async {
+                    if (val == 'add') {
+                      final amount = await _showAddDepositDialog(context);
+                      if (amount != null && amount > 0) {
+                        await provider.addDeposit(g.id, amount);
+                      }
+                    } else if (val == 'delete') {
+                      await provider.deleteGoal(g.id);
+                    }
+                  },
+                  itemBuilder: (_) => [
+                    PopupMenuItem(value: 'add', child: Text('Add Deposit')),
+                    PopupMenuItem(value: 'delete', child: Text('Delete')),
+                  ],
+                ),
+              ),
+            );
+          },
+        );
+      }),
+    );
+  }
+
+  Future<int?> _showAddDepositDialog(BuildContext context) async {
+    final ctrl = TextEditingController();
+    return showDialog<int?>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text('Add Deposit'),
+        content: TextField(
+          controller: ctrl,
+          keyboardType: TextInputType.number,
+          decoration: InputDecoration(hintText: 'Enter amount in ₹'),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx, null), child: Text('Cancel')),
+          ElevatedButton(
+            onPressed: () {
+              final val = int.tryParse(ctrl.text.trim());
+              Navigator.pop(ctx, val ?? 0);
+            },
+            child: Text('Add'),
+          )
+        ],
+      ),
+    );
+  }
+}
+
+
+// =======================
+// File: lib/screens/add_goal_screen.dart
+// =======================
+
+import 'package:flutter/material.dart';
+import 'package:provider/provider.dart';
+import 'package:intl/intl.dart';
+import '../models/goal_model.dart';
+import '../providers/goal_provider.dart';
+
+class AddGoalScreen extends StatefulWidget {
+  const AddGoalScreen({super.key});
+
+  @override
+  State<AddGoalScreen> createState() => _AddGoalScreenState();
+}
+
+class _AddGoalScreenState extends State<AddGoalScreen> {
+  final _formKey = GlobalKey<FormState>();
+  final _titleCtrl = TextEditingController();
+  final _targetCtrl = TextEditingController();
+  DateTime? _deadline;
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(title: Text('Create Goal')),
+      body: Padding(
+        padding: const EdgeInsets.all(12.0),
+        child: Form(
+          key: _formKey,
+          child: Column(
+            children: [
+              TextFormField(
+                controller: _titleCtrl,
+                decoration: InputDecoration(labelText: 'Goal title'),
+                validator: (v) => (v == null || v.trim().isEmpty) ? 'Enter a title' : null,
+              ),
+              SizedBox(height: 12),
+              TextFormField(
+                controller: _targetCtrl,
+                keyboardType: TextInputType.number,
+                decoration: InputDecoration(labelText: 'Target amount (₹)'),
+                validator: (v) {
+                  final n = int.tryParse(v ?? '');
+                  if (n == null || n <= 0) return 'Enter a valid amount';
+                  return null;
+                },
+              ),
+              SizedBox(height: 12),
+              Row(
+                children: [
+                  Expanded(child: Text(_deadline == null ? 'No deadline' : DateFormat.yMMMd().format(_deadline!))),
+                  TextButton(
+                    onPressed: _pickDeadline,
+                    child: Text('Set Deadline'),
+                  )
+                ],
+              ),
+              Spacer(),
+              Row(
+                children: [
+                  Expanded(
+                    child: ElevatedButton(
+                      onPressed: _saveGoal,
+                      child: Text('Create Goal'),
+                    ),
+                  )
+                ],
+              )
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Future<void> _pickDeadline() async {
+    final now = DateTime.now();
+    final picked = await showDatePicker(
+      context: context,
+      initialDate: now,
+      firstDate: now,
+      lastDate: DateTime(now.year + 5),
+    );
+    if (picked != null) setState(() => _deadline = picked);
+  }
+
+  Future<void> _saveGoal() async {
+    if (!_formKey.currentState!.validate()) return;
+    final title = _titleCtrl.text.trim();
+    final target = int.parse(_targetCtrl.text.trim());
+    final provider = Provider.of<GoalProvider>(context, listen: false);
+
+    final newGoal = GoalModel(
+      id: '',
+      title: title,
+      targetAmount: target,
+      savedAmount: 0,
+      deadline: _deadline,
+      createdAt: DateTime.now(),
+    );
+
+    await provider.addGoal(newGoal);
+    if (mounted) Navigator.pop(context);
+  }
+}
+
+
+// =======================
+// File: lib/main.dart (minimal example to test the module)
+// =======================
+
+import 'package:flutter/material.dart';
+import 'package:firebase_core/firebase_core.dart';
+import 'package:provider/provider.dart';
+import 'models/goal_model.dart';
+import 'services/firestore_service.dart';
+import 'providers/goal_provider.dart';
+import 'screens/goals_screen.dart';
+
+// NOTE: replace this 'mockUid' with the real logged-in user's uid from your Auth module.
+const String mockUid = 'demoUser123';
+
+Future<void> main() async {
+  WidgetsFlutterBinding.ensureInitialized();
+  await Firebase.initializeApp();
+  runApp(MyApp());
+}
+
+class MyApp extends StatelessWidget {
+  MyApp({super.key});
+  final firestore = FirestoreService();
+
+  @override
+  Widget build(BuildContext context) {
+    return MultiProvider(
+      providers: [
+        ChangeNotifierProvider(create: (_) => GoalProvider(firestore: firestore, uid: mockUid)),
+      ],
+      child: MaterialApp(
+        title: 'Digital Piggy - Goals',
+        theme: ThemeData(primarySwatch: Colors.indigo),
+        home: GoalsScreen(),
+      ),
+    );
+  }
+}
+
+// End of file. Good luck — when you're ready, ask me for the full integrated repo or help wiring
+// your Auth module (Member 1) so you can replace mockUid with the actual Firebase user UID.
